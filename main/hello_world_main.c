@@ -4,6 +4,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h> 
 
 // SD card
 #include <sys/unistd.h>
@@ -16,6 +17,15 @@
 #include "esp_log.h"
 
 #include "wav.h"
+
+// display
+// #include "esp_lcd_panel_io.h"
+// #include "esp_lcd_panel_vendor.h"
+// #include "esp_lcd_panel_ops.h"
+// #include "driver/i2c.h"
+// #include "esp_err.h"
+// #include "esp_log.h"
+// #include "lvgl.h"
 
 #define MIC_DOUT GPIO_NUM_16
 #define MIC_BCLK GPIO_NUM_17
@@ -30,17 +40,38 @@
 #define SD_CLK GPIO_NUM_18
 #define SD_CS GPIO_NUM_5
 
-#define LED_PIN GPIO_NUM_14
+#define LED_PIN GPIO_NUM_26
 
 #define SAMPLING_RATE 44100
 #define BUFFER_SIZE 1024
 #define WAV_BUFFER_COUNT (BUFFER_SIZE / 4 / sizeof(int16_t))
 #define RECORDING_SAMPLES 65536 * 4
 
+#define TASK_STACK 4096
+
 #define MOUNT_POINT "/sdcard"
 
+QueueHandle_t recPlayQueue;
+TaskHandle_t recPlayManagerTaskHandle;
+
+SemaphoreHandle_t recPlayMgrReady;
+SemaphoreHandle_t recSem;
+SemaphoreHandle_t playSem;
+
+bool recPlayMgrError = false;
+
+typedef enum { RECORD, PLAY, REC_STOP, PLAY_STOP, END } CmdType;
+typedef struct {
+    CmdType type;
+    char filename[16];
+} RecPlayCommand;
+
+char recFileName[32];
+char playFileName[32];
+volatile bool recContinue;
+volatile bool playContinue;
+
 char buffer[BUFFER_SIZE];
-//int16_t recording[RECORDING_SAMPLES];
 int16_t wavBuffer[WAV_BUFFER_COUNT];
 int recIndex = 0;
 
@@ -178,68 +209,83 @@ void unmountSD(sdmmc_card_t *card, sdmmc_host_t *host) {
 
 
 
-void record(FILE *f) {
+void recorderTask(void *pvParameters) {
+    gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
+    
     i2s_chan_handle_t micHandle = getMic();
-
-    char *currentBuffer = buffer;
     size_t bytesRead = 0;
     
-    // Leave some place for header
-    fseek(f, sizeof(wav_header), SEEK_SET);
-    
-    // Read and discard for a while
+    // Read and discard, so we can get stable value
     printf("Starting mic\n");
     i2s_channel_enable(micHandle);
-    vTaskDelay(2000 / portTICK_PERIOD_MS);
-    
-    // time to get average value, which can be subtracted later
-    int64_t bias = 0;
-    const int time = 100;
-    for (int i=0; i < (SAMPLING_RATE * 8 * time / BUFFER_SIZE / 1000); i++) {
-        i2s_channel_read(micHandle, currentBuffer, BUFFER_SIZE, &bytesRead, 1000);
+
+    while (true) {
+        // wait until called for
+        xSemaphoreTake(recSem, portMAX_DELAY);
         
-        int bufferIndex = 0;
-        while (bufferIndex < bytesRead) {
-            int32_t *ptr = (int32_t *)(currentBuffer + bufferIndex + 4);
-            bias += *ptr;
-            bufferIndex += 8;
+        ESP_LOGI("recorder", "Opening file %s", recFileName);
+        FILE *f = fopen(recFileName, "w");
+        if (f == NULL) {
+            ESP_LOGE("recorder", "Failed to open file for writing");
+            return;
         }
-    }
-    bias /= SAMPLING_RATE * time / 1000;
-    printf("Bias: %lld\n", bias);
-    
-    printf("Starting recording...\n");
-    while (recIndex < RECORDING_SAMPLES) {
-        i2s_channel_read(micHandle, currentBuffer, BUFFER_SIZE, &bytesRead, 1000);
+        // Leave some place for header
+        fseek(f, sizeof(wav_header), SEEK_SET);
         
-        int bufferIndex = 0;
-        int wavBufferIndex = 0;
-        while ((recIndex < RECORDING_SAMPLES) && (bufferIndex < bytesRead)) {
-            // get pointer to the left channel 32-bit sample
-            int32_t *ptr = (int32_t *)(currentBuffer + bufferIndex + 4);
-            // do the magic
-            int16_t sample = (*ptr - bias) >> 14;
-            // recording[recIndex] = sample;
-            wavBuffer[wavBufferIndex] = sample;
-            // skip 4 bytes for each channel
-            bufferIndex += 8;
-            wavBufferIndex++;
-            recIndex++;
+        // time to get average value, which can be subtracted later
+        int64_t bias = 0;
+        const int time = 100;
+        for (int i=0; i < (SAMPLING_RATE * 8 * time / BUFFER_SIZE / 1000); i++) {
+            i2s_channel_read(micHandle, buffer, BUFFER_SIZE, &bytesRead, 1000);
+            
+            int bufferIndex = 0;
+            while (bufferIndex < bytesRead) {
+                int32_t *ptr = (int32_t *)(buffer + bufferIndex + 4);
+                bias += *ptr;
+                bufferIndex += 8;
+            }
         }
-        fwrite(wavBuffer, sizeof(wavBuffer), 1, f);
+        bias /= SAMPLING_RATE * time / 1000;
+        printf("Bias: %lld\n", bias);
+        
+        printf("Starting recording...\n");
+        gpio_set_level(LED_PIN, 1);
+        
+        
+        while (recContinue) {
+            i2s_channel_read(micHandle, buffer, BUFFER_SIZE, &bytesRead, 1000);
+            
+            int bufferIndex = 0;
+            int wavBufferIndex = 0;
+            while (bufferIndex < bytesRead) {
+                // get pointer to the left channel 32-bit sample
+                int32_t *ptr = (int32_t *)(buffer + bufferIndex + 4);
+                // do the magic
+                int16_t sample = (*ptr - bias) >> 14;
+                wavBuffer[wavBufferIndex] = sample;
+                // skip 4 bytes for each channel
+                bufferIndex += 8;
+                wavBufferIndex++;
+                recIndex++;
+            }
+            fwrite(wavBuffer, sizeof(wavBuffer), 1, f);
+        }
+        printf("Ending recording...\n");
+        gpio_set_level(LED_PIN, 0);
+        
+        rewind(f);
+        
+        WAVHeader.data_bytes = 2 * recIndex;
+        WAVHeader.wav_size = WAVHeader.data_bytes + sizeof(WAVHeader) - 8; 
+        fwrite(&WAVHeader, sizeof(WAVHeader), 1, f);
+        fclose(f);
     }
-    printf("Ending recording...\n");
+    // this will never happen but whatever
     i2s_channel_disable(micHandle);
     i2s_del_channel(micHandle);
-    
-    rewind(f);
-    
-    WAVHeader.data_bytes = 2 * recIndex;
-    WAVHeader.wav_size = WAVHeader.data_bytes + sizeof(WAVHeader) - 8; 
-    fwrite(&WAVHeader, sizeof(WAVHeader), 1, f);
 }
 
-void printBuffer() {
+void printBuffer(void *pvParameters) {
     char *currentBuffer = buffer;
     for (int i=0; i<BUFFER_SIZE; i++) {
         if (i % 8 == 0) {
@@ -256,68 +302,132 @@ void printBuffer() {
 }
 
 
-void playback(FILE *f) {
-    wav_header fileHeader;
-    fread(&fileHeader, sizeof(wav_header), 1, f);
-    // check header compatible
-    
-    char *currentBuffer = buffer;
-    
+void playerTask() {
     i2s_chan_handle_t ampHandle = getAmp();
     
-    memset(currentBuffer, 0, BUFFER_SIZE);
-    size_t bytesWritten = 0;
-    
-    i2s_channel_enable(ampHandle);
-    
-    printf("Starting playback...\n");
-    
-    int samplesRead = 0;
-    while ((samplesRead = fread(wavBuffer, sizeof(int16_t), WAV_BUFFER_COUNT, f)) != 0) {
+    while (1) {
+        xSemaphoreTake(playSem, portMAX_DELAY);
         
-        int bufferIndex = 0;
-        int wavBufferIndex = 0;
-        while (wavBufferIndex < samplesRead) {
-            int16_t *ptr = (int16_t *)(currentBuffer + bufferIndex + 6);
-            *ptr = wavBuffer[wavBufferIndex];
-            bufferIndex += 8;
-            wavBufferIndex++;
+        ESP_LOGI("sdcard", "Opening file %s", playFileName);
+        FILE *f = fopen(playFileName, "r");
+        if (f == NULL) {
+            ESP_LOGE("sdcard", "Failed to open file for reading");
+            return;
         }
-        i2s_channel_write(ampHandle, currentBuffer, BUFFER_SIZE, &bytesWritten, 1000);
+        wav_header fileHeader;
+        fread(&fileHeader, sizeof(wav_header), 1, f);
+        // check header compatible
+
+        memset(buffer, 0, BUFFER_SIZE);
+        size_t bytesWritten = 0;
+        int samplesRead = 0;
+        
+        printf("Starting playback...\n");
+        i2s_channel_enable(ampHandle);
+        while (playContinue) {
+            samplesRead = fread(wavBuffer, sizeof(int16_t), WAV_BUFFER_COUNT, f);
+            if (samplesRead == 0) {
+                break;
+            }
+            int bufferIndex = 0;
+            int wavBufferIndex = 0;
+            while (wavBufferIndex < samplesRead) {
+                int16_t *ptr = (int16_t *)(buffer + bufferIndex + 6);
+                *ptr = wavBuffer[wavBufferIndex];
+                bufferIndex += 8;
+                wavBufferIndex++;
+            }
+            i2s_channel_write(ampHandle, buffer, BUFFER_SIZE, &bytesWritten, 1000);
+        }
+        
+        i2s_channel_disable(ampHandle);
+        fclose(f);
     }
     
-    i2s_channel_disable(ampHandle);
     i2s_del_channel(ampHandle);
 }
 
+void nameToPath(char *path, char *name) {
+    strcpy(path, MOUNT_POINT);
+    strcat(path, "/");
+    strcat(path, name);
+    strcat(path, ".wav");
+}
 
-void app_main() {
+
+void recPlayManagerTask(void *pvParameters) {
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     sdmmc_card_t *card = mountSD(&host);
     
-    const char *filename = MOUNT_POINT "/rec.wav";
-    FILE *f;
+    recSem = xSemaphoreCreateBinary();
+    playSem = xSemaphoreCreateBinary();
     
-    ESP_LOGI("sdcard", "Opening file %s", filename);
-    f = fopen(filename, "w");
-    if (f == NULL) {
-        ESP_LOGE("sdcard", "Failed to open file for writing");
-        return;
-    }
-    record(f);
-    fclose(f);
+    TaskHandle_t recorderTaskHandle, playerTaskHandle;
+    xTaskCreate(recorderTask, "RECORDER", TASK_STACK, NULL, 1, &recorderTaskHandle);
+    xTaskCreate(playerTask, "PLAYER", TASK_STACK, NULL, 1, &playerTaskHandle);
     
-    ESP_LOGI("sdcard", "Opening file %s", filename);
-    f = fopen(filename, "r");
-    if (f == NULL) {
-        ESP_LOGE("sdcard", "Failed to open file for reading");
-        return;
-    }
-    playback(f);
-    fclose(f);
+    RecPlayCommand cmd;
+    
+    while (xQueueReceive(recPlayQueue, &cmd, portMAX_DELAY)) {
+        switch (cmd.type) {
+            case RECORD:
+                ESP_LOGI("recplaymgr", "Starting recording '%s'\n", cmd.filename);
+                recContinue = true;
+                nameToPath(recFileName, cmd.filename);
+                xSemaphoreGive(recSem);
+                break;
 
-    unmountSD(card, &host);
-    
-    //printBuffer();
+            case PLAY:
+                ESP_LOGI("recplaymgr", "Replaying '%s'\n", cmd.filename);
+                playContinue = true;
+                nameToPath(playFileName, cmd.filename);
+                xSemaphoreGive(playSem);
+                break;
+            
+            case REC_STOP:
+                ESP_LOGI("recplaymgr", "Ending recording\n");
+                recContinue = false;
+                break;
+                
+            case PLAY_STOP:
+                ESP_LOGI("recplaymgr", "Ending playback\n");
+                playContinue = false;
+                break;
+                
+            case END:
+                ESP_LOGI("recplaymgr", "Ending activity, unmounting SD card\n");
+                recContinue = false;
+                playContinue = false;
+                vTaskDelay(10 / portTICK_PERIOD_MS);
+                unmountSD(card, &host);
+                vTaskDelay(portMAX_DELAY);
+                break;
+        }
+    }
+}
 
+void app_main() {
+    recPlayQueue = xQueueCreate(4, sizeof(RecPlayCommand));
+    
+    xTaskCreate(recPlayManagerTask, "REC_PLAY_MGR", TASK_STACK, NULL, 1, &recPlayManagerTaskHandle);
+
+    
+    
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    
+    RecPlayCommand cmd = {RECORD, "1"};
+    xQueueSend(recPlayQueue, &cmd, 0);
+    vTaskDelay(4000 / portTICK_PERIOD_MS);
+    
+    cmd.type = REC_STOP;
+    xQueueSend(recPlayQueue, &cmd, 0);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    
+    cmd.type = PLAY;
+    xQueueSend(recPlayQueue, &cmd, 0);
+    vTaskDelay(2500 / portTICK_PERIOD_MS);
+    
+    cmd.type = END;
+    xQueueSend(recPlayQueue, &cmd, 0);
+    
 }

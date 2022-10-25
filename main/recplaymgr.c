@@ -1,3 +1,4 @@
+#include "recplaymgr.h"
 
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
@@ -11,21 +12,11 @@
 #include <sys/stat.h>
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
-
 #include <string.h>
 
 #include "esp_log.h"
 
 #include "wav.h"
-
-// display
-// #include "esp_lcd_panel_io.h"
-// #include "esp_lcd_panel_vendor.h"
-// #include "esp_lcd_panel_ops.h"
-// #include "driver/i2c.h"
-// #include "esp_err.h"
-// #include "esp_log.h"
-// #include "lvgl.h"
 
 #define MIC_DOUT GPIO_NUM_16
 #define MIC_BCLK GPIO_NUM_17
@@ -35,11 +26,6 @@
 #define AMP_BCLK GPIO_NUM_4
 #define AMP_WS GPIO_NUM_27
 
-#define SD_MISO GPIO_NUM_19
-#define SD_MOSI GPIO_NUM_23
-#define SD_CLK GPIO_NUM_18
-#define SD_CS GPIO_NUM_5
-
 #define LED_PIN GPIO_NUM_26
 
 #define SAMPLING_RATE 44100
@@ -47,9 +33,15 @@
 #define WAV_BUFFER_COUNT (BUFFER_SIZE / 4 / sizeof(int16_t))
 #define RECORDING_SAMPLES 65536 * 4
 
+#define FILENAME_LEN 32
+
 #define TASK_STACK 4096
 
-#define MOUNT_POINT "/sdcard"
+typedef enum { RECORD, PLAY, REC_STOP, PLAY_STOP, END } CmdType;
+typedef struct {
+    CmdType type;
+    char filename[FILENAME_LEN];
+} RecPlayCommand;
 
 QueueHandle_t recPlayQueue;
 TaskHandle_t recPlayManagerTaskHandle;
@@ -58,22 +50,15 @@ SemaphoreHandle_t recPlayMgrReady;
 SemaphoreHandle_t recSem;
 SemaphoreHandle_t playSem;
 
-bool recPlayMgrError = false;
+volatile bool recPlayMgrError = false;
 
-typedef enum { RECORD, PLAY, REC_STOP, PLAY_STOP, END } CmdType;
-typedef struct {
-    CmdType type;
-    char filename[16];
-} RecPlayCommand;
+static char recFileName[FILENAME_LEN];
+static char playFileName[FILENAME_LEN];
+static volatile bool recContinue;
+static volatile bool playContinue;
 
-char recFileName[32];
-char playFileName[32];
-volatile bool recContinue;
-volatile bool playContinue;
-
-char buffer[BUFFER_SIZE];
-int16_t wavBuffer[WAV_BUFFER_COUNT];
-int recIndex = 0;
+static char buffer[BUFFER_SIZE];
+static int16_t wavBuffer[WAV_BUFFER_COUNT];
 
 // .wav_size and .data_bytes still needed
 wav_header WAVHeader = {
@@ -148,67 +133,6 @@ i2s_chan_handle_t getAmp() {
     return tx_handle;
 }
 
-
-sdmmc_card_t *mountSD(sdmmc_host_t *host) {
-    esp_err_t ret;
-    
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024
-    };
-    sdmmc_card_t *card;
-
-    ESP_LOGI("sdcard", "Initializing SD card");
-    
-
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = SD_MOSI,
-        .miso_io_num = SD_MISO,
-        .sclk_io_num = SD_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
-    };
-    
-    ret = spi_bus_initialize(host->slot, &bus_cfg, SDSPI_DEFAULT_DMA);
-    if (ret != ESP_OK) {
-        ESP_LOGE("sdcard", "Failed to initialize bus.");
-        exit(1);
-    }
-    
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = SD_CS;
-    slot_config.host_id = host->slot;
-
-    ESP_LOGI("sdcard", "Mounting filesystem");
-    ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, host, &slot_config, &mount_config, &card);
-
-    if (ret != ESP_OK) {
-        if (ret == ESP_FAIL) {
-            ESP_LOGE("sdcard", "Failed to mount filesystem. "
-                     "If you want the card to be formatted, set the CONFIG_EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
-        } else {
-            ESP_LOGE("sdcard", "Failed to initialize the card (%s). "
-                     "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
-        }
-        exit(1);
-    }
-    ESP_LOGI("sdcard", "Filesystem mounted");
-
-    sdmmc_card_print_info(stdout, card);
-    
-    return card;
-}
-
-void unmountSD(sdmmc_card_t *card, sdmmc_host_t *host) {
-    esp_vfs_fat_sdcard_unmount(MOUNT_POINT, card);
-    ESP_LOGI("sdcard", "Card unmounted");
-    spi_bus_free(host->slot);
-}
-
-
-
 void recorderTask(void *pvParameters) {
     gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
     
@@ -251,7 +175,7 @@ void recorderTask(void *pvParameters) {
         printf("Starting recording...\n");
         gpio_set_level(LED_PIN, 1);
         
-        
+        int wavTotalSamples = 0;
         while (recContinue) {
             i2s_channel_read(micHandle, buffer, BUFFER_SIZE, &bytesRead, 1000);
             
@@ -266,16 +190,16 @@ void recorderTask(void *pvParameters) {
                 // skip 4 bytes for each channel
                 bufferIndex += 8;
                 wavBufferIndex++;
-                recIndex++;
             }
             fwrite(wavBuffer, sizeof(wavBuffer), 1, f);
+            wavTotalSamples += wavBufferIndex;
         }
         printf("Ending recording...\n");
         gpio_set_level(LED_PIN, 0);
         
         rewind(f);
         
-        WAVHeader.data_bytes = 2 * recIndex;
+        WAVHeader.data_bytes = 2 * wavTotalSamples;
         WAVHeader.wav_size = WAVHeader.data_bytes + sizeof(WAVHeader) - 8; 
         fwrite(&WAVHeader, sizeof(WAVHeader), 1, f);
         fclose(f);
@@ -339,25 +263,14 @@ void playerTask() {
             }
             i2s_channel_write(ampHandle, buffer, BUFFER_SIZE, &bytesWritten, 1000);
         }
-        
         i2s_channel_disable(ampHandle);
         fclose(f);
     }
-    
     i2s_del_channel(ampHandle);
-}
-
-void nameToPath(char *path, char *name) {
-    strcpy(path, MOUNT_POINT);
-    strcat(path, "/");
-    strcat(path, name);
-    strcat(path, ".wav");
 }
 
 
 void recPlayManagerTask(void *pvParameters) {
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    sdmmc_card_t *card = mountSD(&host);
     
     recSem = xSemaphoreCreateBinary();
     playSem = xSemaphoreCreateBinary();
@@ -368,66 +281,73 @@ void recPlayManagerTask(void *pvParameters) {
     
     RecPlayCommand cmd;
     
+    xSemaphoreGive(recPlayMgrReady);
     while (xQueueReceive(recPlayQueue, &cmd, portMAX_DELAY)) {
         switch (cmd.type) {
             case RECORD:
-                ESP_LOGI("recplaymgr", "Starting recording '%s'\n", cmd.filename);
+                ESP_LOGI("recplaymgr", "Starting recording '%s'", cmd.filename);
                 recContinue = true;
-                nameToPath(recFileName, cmd.filename);
+                strcpy(recFileName, cmd.filename);
                 xSemaphoreGive(recSem);
                 break;
 
             case PLAY:
-                ESP_LOGI("recplaymgr", "Replaying '%s'\n", cmd.filename);
+                ESP_LOGI("recplaymgr", "Replaying '%s'", cmd.filename);
                 playContinue = true;
-                nameToPath(playFileName, cmd.filename);
+                strcpy(playFileName, cmd.filename);
                 xSemaphoreGive(playSem);
                 break;
             
             case REC_STOP:
-                ESP_LOGI("recplaymgr", "Ending recording\n");
+                ESP_LOGI("recplaymgr", "Ending recording");
                 recContinue = false;
                 break;
                 
             case PLAY_STOP:
-                ESP_LOGI("recplaymgr", "Ending playback\n");
+                ESP_LOGI("recplaymgr", "Ending playback");
                 playContinue = false;
                 break;
                 
             case END:
-                ESP_LOGI("recplaymgr", "Ending activity, unmounting SD card\n");
+                ESP_LOGI("recplaymgr", "Ending activity");
                 recContinue = false;
                 playContinue = false;
-                vTaskDelay(10 / portTICK_PERIOD_MS);
-                unmountSD(card, &host);
                 vTaskDelay(portMAX_DELAY);
                 break;
         }
     }
 }
 
-void app_main() {
-    recPlayQueue = xQueueCreate(4, sizeof(RecPlayCommand));
-    
-    xTaskCreate(recPlayManagerTask, "REC_PLAY_MGR", TASK_STACK, NULL, 1, &recPlayManagerTaskHandle);
 
-    
-    
-    vTaskDelay(3000 / portTICK_PERIOD_MS);
-    
-    RecPlayCommand cmd = {RECORD, "1"};
+void recPlayMgrInit() {
+    recPlayQueue = xQueueCreate(4, sizeof(RecPlayCommand));
+    recPlayMgrReady = xSemaphoreCreateBinary();
+    xTaskCreate(recPlayManagerTask, "REC_PLAY_MGR", TASK_STACK, NULL, 1, &recPlayManagerTaskHandle);
+    // xSemaphoreTake(recPlayMgrReady, portMAX_DELAY);
+}
+
+void startRec(char *filename) {
+    RecPlayCommand cmd;
+    cmd.type = RECORD;
+    strcpy(cmd.filename, filename);
     xQueueSend(recPlayQueue, &cmd, 0);
     vTaskDelay(4000 / portTICK_PERIOD_MS);
-    
-    cmd.type = REC_STOP;
-    xQueueSend(recPlayQueue, &cmd, 0);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-    
+}
+
+void startPlay(char *filename) {
+    RecPlayCommand cmd;
     cmd.type = PLAY;
+    strcpy(cmd.filename, filename);
     xQueueSend(recPlayQueue, &cmd, 0);
-    vTaskDelay(2500 / portTICK_PERIOD_MS);
-    
-    cmd.type = END;
+    vTaskDelay(4000 / portTICK_PERIOD_MS);
+}
+
+void stopRec() {
+    RecPlayCommand cmd = {REC_STOP};
     xQueueSend(recPlayQueue, &cmd, 0);
+}
     
+void stopPlay() {
+    RecPlayCommand cmd = {PLAY_STOP};
+    xQueueSend(recPlayQueue, &cmd, 0);
 }

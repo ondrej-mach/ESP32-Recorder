@@ -62,32 +62,6 @@ static void lvgl_rounder(lv_disp_drv_t *disp_drv, lv_area_t *area) {
     area->y2 = area->y2 | 0x7;
 }
 
-static void example_increase_lvgl_tick(void *arg)
-{
-    /* Tell LVGL how many milliseconds has elapsed */
-    lv_tick_inc(2);
-}
-
-void refreshTask() {
-    
-    ESP_LOGI("oled", "Install LVGL tick timer");
-    // Tick interface for LVGL (using esp_timer to generate 2ms periodic event)
-    const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback = &example_increase_lvgl_tick,
-        .name = "lvgl_tick"
-    };
-    esp_timer_handle_t lvgl_tick_timer = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, 2 * 1000));
-
-    while (1) {
-        // raise the task priority of LVGL and/or reduce the handler period can improve the performance
-        vTaskDelay(pdMS_TO_TICKS(10));
-        // The task running lv_timer_handler should have lower priority than that running `lv_tick_inc`
-        lv_timer_handler();
-    }
-}
-
 
 lv_disp_t *getDisplay() {
 
@@ -148,9 +122,10 @@ lv_disp_t *getDisplay() {
     disp_drv.user_data = panel_handle;
     disp_drv.rounder_cb = lvgl_rounder;
     disp_drv.set_px_cb = lvgl_set_px_cb;
+    // these dont work
+    //disp_drv.sw_rotate = 1;
+    //disp_drv.rotated = LV_DISP_ROT_180;
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
-
-    xTaskCreate(refreshTask, "DISPLAY", 4096, NULL, 1, NULL);
     
     return disp;
 }

@@ -172,7 +172,7 @@ void recorderTask(void *pvParameters) {
         bias /= SAMPLING_RATE * time / 1000;
         printf("Bias: %lld\n", bias);
         
-        printf("Starting recording...\n");
+        ESP_LOGI("recorder", "Starting recording");
         gpio_set_level(LED_PIN, 1);
         
         int wavTotalSamples = 0;
@@ -194,7 +194,7 @@ void recorderTask(void *pvParameters) {
             fwrite(wavBuffer, sizeof(wavBuffer), 1, f);
             wavTotalSamples += wavBufferIndex;
         }
-        printf("Ending recording...\n");
+        ESP_LOGI("recorder", "Ending recording");
         gpio_set_level(LED_PIN, 0);
         
         rewind(f);
@@ -246,7 +246,7 @@ void playerTask() {
         size_t bytesWritten = 0;
         int samplesRead = 0;
         
-        printf("Starting playback...\n");
+        ESP_LOGI("player", "Starting playback");
         i2s_channel_enable(ampHandle);
         while (playContinue) {
             samplesRead = fread(wavBuffer, sizeof(int16_t), WAV_BUFFER_COUNT, f);
@@ -265,6 +265,7 @@ void playerTask() {
         }
         i2s_channel_disable(ampHandle);
         fclose(f);
+        ESP_LOGI("player", "Playback ended");
     }
     i2s_del_channel(ampHandle);
 }
@@ -331,7 +332,6 @@ void startRec(char *filename) {
     cmd.type = RECORD;
     strcpy(cmd.filename, filename);
     xQueueSend(recPlayQueue, &cmd, 0);
-    vTaskDelay(4000 / portTICK_PERIOD_MS);
 }
 
 void startPlay(char *filename) {
@@ -339,7 +339,6 @@ void startPlay(char *filename) {
     cmd.type = PLAY;
     strcpy(cmd.filename, filename);
     xQueueSend(recPlayQueue, &cmd, 0);
-    vTaskDelay(4000 / portTICK_PERIOD_MS);
 }
 
 void stopRec() {

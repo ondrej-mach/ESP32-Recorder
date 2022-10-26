@@ -1,3 +1,5 @@
+// Some of the code in this file is taken from ESP-IDF I2S example
+
 #include "recplaymgr.h"
 
 #include "driver/i2s_std.h"
@@ -288,12 +290,14 @@ void recPlayManagerTask(void *pvParameters) {
             case RECORD:
                 ESP_LOGI("recplaymgr", "Starting recording '%s'", cmd.filename);
                 recContinue = true;
+                playContinue = false;
                 strcpy(recFileName, cmd.filename);
                 xSemaphoreGive(recSem);
                 break;
 
             case PLAY:
                 ESP_LOGI("recplaymgr", "Replaying '%s'", cmd.filename);
+                recContinue = false;
                 playContinue = true;
                 strcpy(playFileName, cmd.filename);
                 xSemaphoreGive(playSem);
@@ -324,7 +328,6 @@ void recPlayMgrInit() {
     recPlayQueue = xQueueCreate(4, sizeof(RecPlayCommand));
     recPlayMgrReady = xSemaphoreCreateBinary();
     xTaskCreate(recPlayManagerTask, "REC_PLAY_MGR", TASK_STACK, NULL, 1, &recPlayManagerTaskHandle);
-    // xSemaphoreTake(recPlayMgrReady, portMAX_DELAY);
 }
 
 void startRec(char *filename) {

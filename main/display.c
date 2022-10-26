@@ -98,6 +98,7 @@ lv_disp_t *getDisplay() {
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(io_handle, &panel_config, &panel_handle));
 
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, true));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
@@ -122,9 +123,6 @@ lv_disp_t *getDisplay() {
     disp_drv.user_data = panel_handle;
     disp_drv.rounder_cb = lvgl_rounder;
     disp_drv.set_px_cb = lvgl_set_px_cb;
-    // these dont work
-    //disp_drv.sw_rotate = 1;
-    //disp_drv.rotated = LV_DISP_ROT_180;
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
     
     return disp;

@@ -39,9 +39,9 @@
 #define TASK_STACK 4096
 
 #define MOUNT_POINT "/sdcard"
+#define REC_DIR MOUNT_POINT "/rec"
 
 TaskHandle_t UITaskHandle;
-QueueHandle_t buttonQueue;
 lv_disp_t *disp;
 
 typedef enum { UP, DOWN, OK, OK_LONG } ButtonEvent;
@@ -130,23 +130,26 @@ int showFiles(lv_disp_t *disp, int selected) {
     const int LINES_FIT = 8;
     const int LINES_BEFORE = 2;
     
-    DIR *mydir;
-    struct dirent *myfile;
+    DIR *dir;
+    struct dirent *f;
     char filename[32];
 
     char buf[512] = {0};
-    mydir = opendir(MOUNT_POINT);
+    dir = opendir(REC_DIR);
     
     int index = 0;
     while (true) {
         if (index == 0) {
             strcpy(filename, "[Record]");
         } else {
-            myfile = readdir(mydir);
-            if (myfile == NULL) {
+            f = readdir(dir);
+            if (f == NULL) {
                 break;
             }
-            strcpy(filename, myfile->d_name);
+            if (f->d_type != DT_REG) {
+                continue;
+            }
+            strcpy(filename, f->d_name);
         }
             
         if ((index >= selected - LINES_BEFORE) && (index <= selected + LINES_FIT)) {
@@ -156,103 +159,91 @@ int showFiles(lv_disp_t *disp, int selected) {
         }
         index++;
     }
-    closedir(mydir);
+    closedir(dir);
     lvPrint(disp, buf);
     return index;
 }
 
 void getFilenameFromIndex(char *filename, int selected) {
-    DIR *mydir;
-    struct dirent *myfile;
+    DIR *dir;
+    struct dirent *f;
 
-    mydir = opendir(MOUNT_POINT);
+    dir = opendir(REC_DIR);
     int index = 1;
-    while((myfile = readdir(mydir)) != NULL) {
+    while((f = readdir(dir)) != NULL) {
+        if (f->d_type != DT_REG) {
+            continue;
+        }
         if (index == selected) {
-            sprintf(filename, "%s/%s", MOUNT_POINT, myfile->d_name);
+            sprintf(filename, "%s/%s", REC_DIR, f->d_name);
             break;
         }
         index++;
     }
-    closedir(mydir);
+    closedir(dir);
 }
     
 void getNewFilename(char *filename) {
     int index = 1;
     do {
-        sprintf(filename, "%s/%d.wav", MOUNT_POINT, index);
+        sprintf(filename, "%s/%d.wav", REC_DIR, index);
         index++;
     } while (access(filename, F_OK) == 0);
 }
 
 
-
-
-void gpioHandler(void* arg)
-{
-	printf("Interrupt\n");
-}
-
-// code from https://esp32tutorials.com/esp32-gpio-interrupts-esp-idf/
-static void IRAM_ATTR buttonISR(void *args) {
-    //uint32_t gpio_num = READ_PERI_REG(GPIO_STATUS_REG);
-
-    int pin = (int)args;
-    
-    static int pinHolding = -1;
-    static uint32_t pushTime = 0;
-    
-    bool relevant = false;
-    for (int i=0; i<(sizeof(buttons)/sizeof(int)); i++) {
-        if (buttons[i] == pin) {
-            relevant = true;
-        }
-    }
-    if (!relevant) {
-        return;
-    }
-    
-    if (gpio_get_level(pin)) {
-        // new push
-        if (pinHolding == -1) {
-            pinHolding = pin;
-            pushTime = esp_log_timestamp();
-        }
-    } else {
-        // on release
-        if (pinHolding == pin) {
-            int holdTime = esp_log_timestamp() - pushTime;
-            ButtonEvent e;
-            switch (pin) {
-                case BUTTON_UP:
-                    e = UP;
-                    break;
-                    
-                case BUTTON_DOWN:
-                    e = DOWN;
-                    break;
-                    
-                case BUTTON_OK:
-                    e = (holdTime < 500) ? OK : OK_LONG;
-                    break;
-            }
-            xQueueSendFromISR(buttonQueue, &e, 0);
-            pinHolding = -1;
-        }
-    }
-}
-
 ButtonEvent waitEvent() {
     while (true) {
+        bool holding = false;
         for (int i=0; i<(sizeof(buttons)/sizeof(int)); i++) {
-            gpio_set_direction(buttons[i], GPIO_MODE_INPUT);
-            gpio_pulldown_en(buttons[i]);
-            gpio_pullup_dis(buttons[i]);
-            // gpio_set_intr_type(buttons[i], GPIO_INTR_ANYEDGE);
-            // gpio_isr_handler_add(buttons[i], buttonISR, (void *)buttons[i]);
+            if (gpio_get_level(buttons[i])) {
+                holding = true;
+                break;
+            }
         }
-        vTaskDelay(portMAX_DELAY);
+        if (holding == false) {
+            break;
+        }
+        vTaskDelay(10/portTICK_PERIOD_MS);
     }
+    
+    bool pushed = false;
+    int i=0;
+    
+    while (!pushed) {
+        vTaskDelay(10/portTICK_PERIOD_MS);
+        for (i=0; i<(sizeof(buttons)/sizeof(int)); i++) {
+            if (gpio_get_level(buttons[i])) {
+                pushed = true;
+                break;
+            }
+        }
+    }
+    uint32_t pushTime = esp_log_timestamp();
+    
+    while (esp_log_timestamp() - pushTime < 500) {
+        vTaskDelay(10/portTICK_PERIOD_MS);
+        if (gpio_get_level(buttons[i]) == 0) {
+            pushed = false;
+            break;
+        }
+    }
+    
+    ButtonEvent e = OK;
+    switch (buttons[i]) {
+        case BUTTON_UP:
+            e = UP;
+            break;
+            
+        case BUTTON_DOWN:
+            e = DOWN;
+            break;
+            
+        case BUTTON_OK:
+            e = pushed ? OK_LONG : OK;
+            break;
+    }
+    return e;
 }
 
 void UITask() {
@@ -263,7 +254,8 @@ void UITask() {
     int menuItemsCount = showFiles(disp, 0);
     char filename[32];
     
-    while (xQueueReceive(buttonQueue, &e, portMAX_DELAY)) {
+    while (true) {
+        e = waitEvent();
         printf("Event %d\n", e);
         switch (e) {
             case UP:
@@ -281,7 +273,8 @@ void UITask() {
                     getNewFilename(filename);
                     startRec(filename);
                     lvPrint(disp, "RECORDING...");
-                    xQueueReceive(buttonQueue, &e, portMAX_DELAY);
+                    e = waitEvent();
+                    stopRec();
                 } else {
                     getFilenameFromIndex(filename, menuIndex);
                     startPlay(filename);
@@ -289,6 +282,14 @@ void UITask() {
                 break;
                 
             case OK_LONG:
+                if (menuIndex == 0) {
+
+                } else {
+                    getFilenameFromIndex(filename, menuIndex);
+                    unlink(filename);
+                    menuIndex--;
+                    menuItemsCount--;
+                }
                 break;
         }
         menuItemsCount = showFiles(disp, menuIndex);
@@ -307,8 +308,8 @@ void app_main() {
         ESP_LOGE("main", "SD card not detected");
         vTaskDelay(portMAX_DELAY);
     }
+    mkdir(REC_DIR, ACCESSPERMS);
 
-    buttonQueue = xQueueCreate(1, sizeof(ButtonEvent));
     
     for (int i=0; i<(sizeof(buttons)/sizeof(int)); i++) {
         // gpio_pad_select_gpio(buttons[i]);
@@ -317,11 +318,7 @@ void app_main() {
         gpio_pullup_dis(buttons[i]);
         gpio_set_intr_type(buttons[i], GPIO_INTR_ANYEDGE);
         gpio_intr_enable(buttons[i]);
-        // gpio_set_intr_type(buttons[i], GPIO_INTR_ANYEDGE);
-        // gpio_isr_handler_add(buttons[i], buttonISR, (void *)buttons[i]);
     }
-    gpio_isr_register(gpioHandler, NULL, 0, NULL);
-    
     
     xTaskCreate(UITask, "UI", 16384, NULL, 1, &UITaskHandle);
     

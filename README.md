@@ -1,53 +1,95 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- |
+# Digitální záznamové zařízení
 
-# Hello World Example
-
-Starts a FreeRTOS task to print "Hello World".
-
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
-
-## How to use example
-
-Follow detailed instructions provided specifically for this example. 
-
-Select the instructions depending on Espressif chip installed on your development board:
-
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
+Cílem projektu bylo sestavit záznamník za použití SoC ESP32.
+Zařízení dále používá mikrofon SPH0645 a zesilovač MAX98357A, které komunikují po sběrnici I2S.
+Dále je připojena SD katra, na které jsou uchovány záznamy ve formátu WAV.
+Uživatel se zařízením interaguje pomocí tří tlačítek a OLED displaye SSD1306.
 
 
-## Example folder contents
 
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
+## Zapojení
 
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both). 
+Vzhledem k tomu, že ESP32 umožňuje připojení téměř jakékoli periferie k jakémukoli pinu, je toto zapojení poměrně arbitrární. 
+V tomto projektu byla použit vývojový kit Wemos D1 R32.
+Všechny periferie byly napájeny z 3.3V vycházející z této desky, deska samotná byla napájena přes USB.
 
-Below is short explanation of remaining files in the project folder.
+### SPH0645
 
-```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
-```
+Mikrofon komunikuje po sběrnici I2S. Jeho piny jsou zapojeny následovně:
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
+| SPH0645 | ESP32 |
+|---------|-------|
+| BCLK    | 17    |
+| DOUT    | 16    |
+| LRCL    | 25    |
+| SEL     | 3.3V  |
 
-## Troubleshooting
+### MAX98357A
 
-* Program upload failure
+Zesilováč komunikuje po sběrnici I2S. 
+Teoreticky by zřejmě mohla být použita stejná sběrnice, na které komunikuje mikrofon.
+Pro tento případ je ale použita druhá, protože ESP32 může obsluhovat až dvě najednou.
+Také lze individuálně zapínat a vypínat sběrnice pro tyto periferie.
+Jeho piny jsou zapojeny následovně:
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+| MAX98357A | ESP32 |
+|-----------|-------|
+| BCLK      | 2     |
+| DIN       | 4     |
+| LRC       | 27    |
 
-## Technical support and feedback
+### SD karta
 
-Please use the following feedback channels:
+SD karta komunikuje přes rozhraní SPI. 
+K mikrokontroléru je připojena adaptérem bez LDO regulátoru a bez level shifteru.
 
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
+| SD adaptér | ESP32 |
+|------------|-------|
+| MISO       | 19    |
+| MOSI       | 23    |
+| CLK        | 18    |
+| CS         | 5     |
 
-We will get back to you as soon as possible.
+### SSD1306
+
+OLED dislay komunikuje přes rozhraní I2C.
+Nebylo potřeba použití pullup rezistorů, zřejmě byly zapnuté softwarově v ESP32.
+
+| SSD1306 | ESP32 |
+|---------|-------|
+| SDA     | 21    |
+| SCL     | 22    |
+
+### Tlačítka a LED
+
+K mikrokontroléru jsou připojena 3 tlačítka (UP, DOWN, OK) na piny 13, 12 a 14.
+Všechna tlačítka jsou typu NO (normally open) a z druhé strany připojena k 3.3V.
+
+LED není pro projekt nutná, její jediný účel je signalizace nahrávání.
+Anoda LED je připojena k pinu 26 přes rezistor.
+
+## Způsob vývoje
+
+Prvním krokem byla volba a instalace vývojového prostředí.
+Pro tento projekt bylo zvoleno ESP-IDF, které je vyvíjené a podporované výrobcem.
+ESP-IDF je open source pod licencí Apache 2.0.
+
+Dále bylo potřeba oživit všechny periferie.
+Toto bylo nejjednodušší nahráním příkladu z ESP-IDF.
+
+Poté co byla ověřena funkčnost a kompatibilita všech periferií zvlášť, bylo možné kód integrovat do jednoho projektu.
+Nejprve bylo zprovozněno nahrávání a převod na požadovaný formát.
+Pak následovalo přehrávání z tohoto formátu.
+Dále byla integrována SD karta a implementováno ukládání WAV souborů.
+
+## Implementační detaily
+
+### Úlohy FreeRTOS
+
+
+
+
+## Použité zdroje
+
+- [ESP-IDF Examples](https://github.com/espressif/esp-idf/tree/master/examples)
+

@@ -106,15 +106,6 @@ void unmountSD(sdmmc_card_t *card, sdmmc_host_t *host) {
     spi_bus_free(host->slot);
 }
 
-void example_lvgl_demo_ui(lv_disp_t *disp)
-{
-    lv_obj_t *scr = lv_disp_get_scr_act(disp);
-    lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "Hello Espressif\nXD");
-    lv_obj_set_width(label, 128);
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 0);
-}
-
 void lvPrint(lv_disp_t *disp, char *text) {
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
     lv_obj_clean(scr);

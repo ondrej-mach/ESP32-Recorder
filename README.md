@@ -107,12 +107,10 @@ void stopPlay();
 
 Je důležité, že žádná z těchto funkcí není blokující.
 Díky tomu může uživatelské rozhraní např. spustit nahrávání a potom provádět svůj kód.
-V rámci subsystému běží tři úlohy - jedna pro nahrávání, jedna pro přehrávání a jedna jako správce.
-Při zpětném pohledu by správce ani nebyl nutný, je to spíše pozůstatek po vývoji.
-Implementace je ale plně funkční a není důvod ji předělávat.
+V rámci subsystému běží dvě úlohy - jedna pro nahrávání, jedna pro přehrávání.
+Při zpětném pohledu by možná stačila jedna, ale implementace je plně funkční a není důvod ji předělávat.
 
-Všechny veřejné funkce modulu dělají jedinou věc, a to že umístí do fronty strukturu `RecPlayCommand`, kterou později zpracuje manager.
-Ten také při zpracování nastaví příslušné proměnné a semafory, které jsou později přečteny samotnou úlohou záznamníku, resp. přehrávače.
+Všechny veřejné funkce modulu dělají jedinou věc - nastaví příslušné proměnné a semafory, které jsou později přečteny samotnou úlohou záznamníku, resp. přehrávače.
 
 Úlohy záznamníku a přehrávače přímo přistupují k SD kartě, kde zapisují resp. čtou WAV soubory.
 Výběr tohoto formátu byl také důležité implementační rozhodnutí.

@@ -48,7 +48,6 @@ typedef struct {
 QueueHandle_t recPlayQueue;
 TaskHandle_t recPlayManagerTaskHandle;
 
-SemaphoreHandle_t recPlayMgrReady;
 SemaphoreHandle_t recSem;
 SemaphoreHandle_t playSem;
 
@@ -148,6 +147,7 @@ void recorderTask(void *pvParameters) {
     while (true) {
         // wait until called for
         xSemaphoreTake(recSem, portMAX_DELAY);
+        recContinue = true;
         
         ESP_LOGI("recorder", "Opening file %s", recFileName);
         FILE *f = fopen(recFileName, "w");
@@ -233,6 +233,7 @@ void playerTask() {
     
     while (1) {
         xSemaphoreTake(playSem, portMAX_DELAY);
+        playContinue = true;
         
         ESP_LOGI("sdcard", "Opening file %s", playFileName);
         FILE *f = fopen(playFileName, "r");
@@ -273,83 +274,36 @@ void playerTask() {
 }
 
 
-void recPlayManagerTask(void *pvParameters) {
-    
+void recPlayMgrInit() {
     recSem = xSemaphoreCreateBinary();
     playSem = xSemaphoreCreateBinary();
     
-    TaskHandle_t recorderTaskHandle, playerTaskHandle;
-    xTaskCreate(recorderTask, "RECORDER", TASK_STACK, NULL, 1, &recorderTaskHandle);
-    xTaskCreate(playerTask, "PLAYER", TASK_STACK, NULL, 1, &playerTaskHandle);
-    
-    RecPlayCommand cmd;
-    
-    xSemaphoreGive(recPlayMgrReady);
-    while (xQueueReceive(recPlayQueue, &cmd, portMAX_DELAY)) {
-        switch (cmd.type) {
-            case RECORD:
-                ESP_LOGI("recplaymgr", "Starting recording '%s'", cmd.filename);
-                recContinue = true;
-                playContinue = false;
-                strcpy(recFileName, cmd.filename);
-                xSemaphoreGive(recSem);
-                break;
-
-            case PLAY:
-                ESP_LOGI("recplaymgr", "Replaying '%s'", cmd.filename);
-                recContinue = false;
-                playContinue = true;
-                strcpy(playFileName, cmd.filename);
-                xSemaphoreGive(playSem);
-                break;
-            
-            case REC_STOP:
-                ESP_LOGI("recplaymgr", "Ending recording");
-                recContinue = false;
-                break;
-                
-            case PLAY_STOP:
-                ESP_LOGI("recplaymgr", "Ending playback");
-                playContinue = false;
-                break;
-                
-            case END:
-                ESP_LOGI("recplaymgr", "Ending activity");
-                recContinue = false;
-                playContinue = false;
-                vTaskDelay(portMAX_DELAY);
-                break;
-        }
-    }
-}
-
-
-void recPlayMgrInit() {
-    recPlayQueue = xQueueCreate(4, sizeof(RecPlayCommand));
-    recPlayMgrReady = xSemaphoreCreateBinary();
-    xTaskCreate(recPlayManagerTask, "REC_PLAY_MGR", TASK_STACK, NULL, 1, &recPlayManagerTaskHandle);
+    xTaskCreate(recorderTask, "RECORDER", TASK_STACK, NULL, 1, NULL);
+    xTaskCreate(playerTask, "PLAYER", TASK_STACK, NULL, 1, NULL);
 }
 
 void startRec(char *filename) {
-    RecPlayCommand cmd;
-    cmd.type = RECORD;
-    strcpy(cmd.filename, filename);
-    xQueueSend(recPlayQueue, &cmd, 0);
+    ESP_LOGI("recplaymgr", "Starting recording '%s'", filename);
+    playContinue = false;
+    recContinue = false;
+    strcpy(recFileName, filename);
+    xSemaphoreGive(recSem);
 }
 
 void startPlay(char *filename) {
-    RecPlayCommand cmd;
-    cmd.type = PLAY;
-    strcpy(cmd.filename, filename);
-    xQueueSend(recPlayQueue, &cmd, 0);
+    ESP_LOGI("recplaymgr", "Replaying '%s'", filename);
+    playContinue = false;
+    recContinue = false;
+    strcpy(playFileName, filename);
+    xSemaphoreGive(playSem);
 }
 
 void stopRec() {
-    RecPlayCommand cmd = {REC_STOP};
-    xQueueSend(recPlayQueue, &cmd, 0);
+    ESP_LOGI("recplaymgr", "Ending recording");
+    recContinue = false;
 }
     
 void stopPlay() {
-    RecPlayCommand cmd = {PLAY_STOP};
-    xQueueSend(recPlayQueue, &cmd, 0);
+    ESP_LOGI("recplaymgr", "Ending playback");
+    playContinue = false;
 }

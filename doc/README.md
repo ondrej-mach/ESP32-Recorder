@@ -5,11 +5,17 @@ Zařízení dále používá mikrofon SPH0645 a zesilovač MAX98357A, které kom
 Dále je připojena SD katra, na které jsou uchovány záznamy ve formátu WAV.
 Uživatel se zařízením interaguje pomocí tří tlačítek a OLED displaye SSD1306.
 
+Demo: [https://youtu.be/XlY9lgNC9gY](https://youtu.be/XlY9lgNC9gY)
+
+WAV nahrávky z videa jsou přiloženy ve složce recordings.
+
+
 ## Zapojení
 
 Vzhledem k tomu, že ESP32 umožňuje připojení téměř jakékoli periferie k jakémukoli pinu, je toto zapojení poměrně arbitrární. 
 V tomto projektu byla použit vývojový kit Wemos D1 R32.
 Všechny periferie byly napájeny z 3.3V vycházející z této desky, deska samotná byla napájena přes USB.
+
 
 ### SPH0645
 
